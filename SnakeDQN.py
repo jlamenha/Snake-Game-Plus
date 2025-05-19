@@ -51,11 +51,10 @@ class SnakeGameRLWrapper(gym.Env):
         self.action_space = gym.spaces.Discrete(4)  # Up, Down, Left, Right
         
         # Enhanced observation space
-        self.observation_space = gym.spaces.Box(
-            low=-1, high=1, 
-            shape=(7,), # Modified observation space with better features
-            dtype=np.float32
-        )
+        self.observation_space = gym.spaces.Dict({
+            "grid": gym.spaces.Box(low=0, high=1, shape=(3, GRID_SIZE, GRID_SIZE), dtype=np.float32),
+            "features": gym.spaces.Box(low=-1, high=1, shape=(8,), dtype=np.float32)
+        })
         
         # Create the original Snake game instance
         self.game = SnakeGame()
@@ -103,6 +102,9 @@ class SnakeGameRLWrapper(gym.Env):
         
         return self._get_observation(), {}
     
+    def _is_looping(self):
+        return len(set(self.game.snake)) < len(self.game.snake) - 1  # more than 1 duplicate = loop
+    
     def _generate_random_food(self):
         while True:
             food = (
@@ -114,48 +116,38 @@ class SnakeGameRLWrapper(gym.Env):
                 return food
                 
     def _get_observation(self):
-        """Get an enhanced observation of the game state"""
-        head_x, head_y = self.game.snake[0]
-        food_x, food_y = self.game.food
-        
-        # Normalize positions to [-1, 1]
-        norm_head_x = (head_x / (GRID_SIZE - 1)) * 2 - 1
-        norm_head_y = (head_y / (GRID_SIZE - 1)) * 2 - 1
-        norm_food_x = (food_x / (GRID_SIZE - 1)) * 2 - 1
-        norm_food_y = (food_y / (GRID_SIZE - 1)) * 2 - 1
-        
-        # Calculate danger in each direction (0 = safe, 1 = danger)
-        danger_up = 1.0 if self._is_collision(head_x, head_y - 1) or self._is_collision(head_x, head_y - 2) else 0.0
-        danger_right = 1.0 if self._is_collision(head_x + 1, head_y) or self._is_collision(head_x + 2, head_y) else 0.0
-        danger_down = 1.0 if self._is_collision(head_x, head_y + 1) or self._is_collision(head_x, head_y + 2) else 0.0
-        danger_left = 1.0 if self._is_collision(head_x - 1, head_y) or self._is_collision(head_x - 2, head_y) else 0.0
-        
-        # Current direction
-        dir_up = 1.0 if self.game.direction == "UP" else 0.0
-        dir_right = 1.0 if self.game.direction == "RIGHT" else 0.0
-        dir_down = 1.0 if self.game.direction == "DOWN" else 0.0
-        dir_left = 1.0 if self.game.direction == "LEFT" else 0.0
-        
-        # Food direction
-        food_up = 1.0 if food_y < head_y else 0.0
-        food_right = 1.0 if food_x > head_x else 0.0
-        food_down = 1.0 if food_y > head_y else 0.0
-        food_left = 1.0 if food_x < head_x else 0.0
-        
-        return np.array([
-            # Normalized relative food position
-            (food_x - head_x) / GRID_SIZE,  # Food x relative to head (normalized)
-            (food_y - head_y) / GRID_SIZE,  # Food y relative to head (normalized)
-            
-            # Danger in each direction
-            danger_up,
-            danger_right,
-            danger_down,
-            danger_left,
-            
-            # Snake length (normalized)
-            len(self.game.snake) / GRID_SIZE**2  # Normalized snake length
+        grid = np.zeros((3, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+
+        # Channel 0: head
+        hx, hy = self.game.snake[0]
+        grid[0, hy, hx] = 1.0
+
+        # Channel 1: body
+        for x, y in self.game.snake[1:]:
+            grid[1, y, x] = 1.0
+
+        # Channel 2: food
+        fx, fy = self.game.food
+        grid[2, fy, fx] = 1.0
+
+        # Feature vector (same as before or add more)
+        food_dx = (fx - hx) / GRID_SIZE
+        food_dy = (fy - hy) / GRID_SIZE
+        snake_len = len(self.game.snake) / (GRID_SIZE ** 2)
+        looping = 1.0 if self._is_looping() else 0.0
+        danger_up = 1.0 if self._is_collision(hx, hy - 1) else 0.0
+        danger_down = 1.0 if self._is_collision(hx, hy + 1) else 0.0
+        danger_left = 1.0 if self._is_collision(hx - 1, hy) else 0.0
+        danger_right = 1.0 if self._is_collision(hx + 1, hy) else 0.0
+
+        features = np.array([
+            food_dx, food_dy,
+            danger_up, danger_down, danger_left, danger_right,
+            snake_len,
+            looping
         ], dtype=np.float32)
+
+        return grid, features
     
     def _is_collision(self, x, y):
         """Check if a position would result in collision"""
@@ -200,32 +192,32 @@ class SnakeGameRLWrapper(gym.Env):
         food = self.game.food
         current_distance = abs(head[0] - food[0]) + abs(head[1] - food[1])
         
-        # Improved Reward Shaping
-        reward = 0
-        
-        # 1. Survival reward - small positive reward for staying alive
-        reward += 0.01
-        
-        # 2. Food distance reward - moderate reward for getting closer to food
-        if self.previous_distance is not None:
-            distance_change = self.previous_distance - current_distance
-            reward += distance_change * 0.1
-        
-        # 3. Food reward - larger reward for eating food
+        reward = 0.0
+
+        # Encourage staying alive
+        reward += 0.05
+
+        # Reward for eating food
         if self.game.score > initial_score:
-            reward += 1.0
+            reward += 5.0
             self.steps_without_food = 0
         else:
             self.steps_without_food += 1
-        
-        # 4. Starvation penalty - penalty for not finding food for too long
-        if self.steps_without_food > self.max_steps_without_food:
-            reward -= 0.5
 
-        
-        # 5. Death penalty - penalty for dying
-        if done:
-            reward -= (1.0 * (1.0 - (self.game.score)/256))
+        # Encourage progress toward food
+        if self.previous_distance is not None:
+            distance_change = self.previous_distance - current_distance
+            reward += np.clip(distance_change, -1.0, 1.0) * 0.5  # gentler scaling
+
+        # Starvation penalty
+        if self.steps_without_food > self.max_steps_without_food:
+            done = True
+            reward -= 2.0
+
+        # Death penalty
+        if done and self.steps_without_food <= self.max_steps_without_food:
+            reward -= 2.0
+
         
         # Update previous distance for next step
         self.previous_distance = current_distance
@@ -239,36 +231,41 @@ class SnakeGameRLWrapper(gym.Env):
         )
 
 class DQN(nn.Module):
-    def __init__(self, input_size, output_size):
-        super(DQN, self).__init__()
-        
-        # A more specialized network architecture
-        self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 128)
-        self.fc4 = nn.Linear(128, output_size)
-        
-        # Initialize weights with Xavier/Glorot initialization
-        nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.xavier_uniform_(self.fc2.weight)
-        nn.init.xavier_uniform_(self.fc3.weight)
-        nn.init.xavier_uniform_(self.fc4.weight)
-    
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        return self.fc4(x)  # No activation on the output layer for Q-values
+    def __init__(self, input_channels, grid_size, feature_dim, num_actions):
+        super().__init__()
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        cnn_output_size = 64 * grid_size * grid_size
+        combined_input_size = cnn_output_size + feature_dim
+
+        self.head = nn.Sequential(
+            nn.Linear(combined_input_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        )
+
+    def forward(self, grid, features):
+        grid_out = self.cnn(grid)                    # (batch, cnn_size)
+        combined = torch.cat([grid_out, features], dim=1)  # Concatenate on feature dim
+        return self.head(combined)
 
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, lr=0.0005):
+    def __init__(self, state_dim, feature_dim=8, action_dim = 4, lr=0.0005, dropout_prob=0.1):
+        input_channels, grid_size, _ = state_dim
         self.device = device
-        
-        # Main network for actions
-        self.policy_net = DQN(state_dim, action_dim).to(self.device)
+
+        self.policy_net = DQN(input_channels, grid_size, feature_dim, action_dim).to(self.device)
+        self.target_net = DQN(input_channels, grid_size, feature_dim, action_dim).to(self.device)
         
         # Target network for stable Q-value predictions
-        self.target_net = DQN(state_dim, action_dim).to(self.device)
+        
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()  # Target network is used for inference only
         
@@ -279,7 +276,7 @@ class DQNAgent:
         self.gamma = 0.99  # Discount factor
         self.eps_start = 1.0  # Starting epsilon for exploration
         self.eps_end = 0.05  # Minimum epsilon
-        self.eps_decay = 0.9999  # Decay rate for epsilon
+        self.eps_decay = 0.99995  # Decay rate for epsilon
         self.target_update = 1000  # Update target network every N steps
         self.batch_size = 64  # Batch size for training
         
@@ -295,19 +292,19 @@ class DQNAgent:
     def select_action(self, state):
         # Decay epsilon
         self.epsilon = max(self.eps_end, self.epsilon * self.eps_decay)
-        
+
+        grid, features = state  # unpack tuple
+        grid = torch.FloatTensor(grid).unsqueeze(0).to(self.device)
+        features = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+
         # Epsilon-greedy action selection
         if random.random() < self.epsilon:
-            # Random action
             return random.randint(0, 3)
         else:
-            # Convert state to tensor
-            state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            
-            # Get action with highest Q-value
             with torch.no_grad():
-                q_values = self.policy_net(state)
+                q_values = self.policy_net(grid, features)
                 return q_values.max(1)[1].item()
+
     
     def store_experience(self, state, action, reward, next_state, done):
         # Store transition in replay memory
@@ -315,57 +312,58 @@ class DQNAgent:
         self.memory.push(experience)
     
     def train(self):
-        # Check if we have enough samples
         if len(self.memory) < self.batch_size:
             return 0.0  # Not enough samples yet
-        
+
         # Sample a batch from memory
         experiences = self.memory.sample(self.batch_size)
-        
-        # Convert batch of experiences to tensors
         batch = Experience(*zip(*experiences))
-        
-        # Convert to appropriate tensor shapes
-        state_batch = torch.FloatTensor(np.array(batch.state, dtype=np.float32)).to(self.device)
+
+        # Unpack grid and feature components
+        grids, features = zip(*batch.state)
+        next_grids, next_features = zip(*batch.next_state)
+
+        # Convert to tensors
+        grid_batch = torch.FloatTensor(np.array(grids)).to(self.device)
+        features_batch = torch.FloatTensor(np.array(features)).to(self.device)
+        next_grid_batch = torch.FloatTensor(np.array(next_grids)).to(self.device)
+        next_features_batch = torch.FloatTensor(np.array(next_features)).to(self.device)
+
         action_batch = torch.LongTensor(batch.action).unsqueeze(1).to(self.device)
         reward_batch = torch.FloatTensor(batch.reward).unsqueeze(1).to(self.device)
-        next_state_batch = torch.FloatTensor(np.array(batch.next_state, dtype=np.float32)).to(self.device)
         done_batch = torch.FloatTensor(batch.done).unsqueeze(1).to(self.device)
-        
-        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken
-        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
-        
-        # Compute V(s_{t+1}) for all next states.
-        # Expected values of actions for non_final_next_states are computed based on the "older" target_net; 
-        # selecting their best reward with max(1)[0].
-        next_state_values = torch.zeros(self.batch_size, 1, device=self.device)
+
+        # Compute Q(s_t, a)
+        state_action_values = self.policy_net(grid_batch, features_batch).gather(1, action_batch)
+
+        # Compute V(s_{t+1}) using target net
         with torch.no_grad():
-            next_state_values = self.target_net(next_state_batch).max(1)[0].unsqueeze(1)
-        
-        # Compute the expected Q values
-        expected_state_action_values = reward_batch + (self.gamma * next_state_values * (1 - done_batch))
-        
-        # Compute Huber loss (more robust than MSE)
-        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values)
-        
-        # Optimize the model
+            next_q_values = self.target_net(next_grid_batch, next_features_batch)
+            next_actions = next_q_values.max(1)[1].unsqueeze(1)
+            next_state_values = next_q_values.gather(1, next_actions)
+
+        # Compute expected Q-values
+        expected_q_values = reward_batch + self.gamma * next_state_values * (1 - done_batch)
+
+        # Loss and optimization
+        loss = F.smooth_l1_loss(state_action_values, expected_q_values)
+
         self.optimizer.zero_grad()
         loss.backward()
-        
-        # Gradient clipping to prevent exploding gradients
+
         for param in self.policy_net.parameters():
             param.grad.data.clamp_(-1, 1)
-            
+
         self.optimizer.step()
-        
-        # Update target network periodically
+
+        # Periodic target net update
         self.steps_done += 1
         if self.steps_done % self.target_update == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
-        
+
         return loss.item()
 
-def train_dqn(env, agent, num_episodes=1000):
+def train_dqn(env, agent, num_episodes=100000):
     """Train the agent using DQN algorithm with no step limit"""
     # Create logs directory
     os.makedirs('training_logs', exist_ok=True)
@@ -422,7 +420,7 @@ def train_dqn(env, agent, num_episodes=1000):
         episode_scores.append(env.game.score)
         
 
-        save_every = 50
+        save_every = 10000
         # Periodic logging and saving
         if (episode + 1) % save_every == 0:
             current_time = time.time()
@@ -496,7 +494,8 @@ def play_with_trained_model(model_path='best_models/best_score_model.pth', num_g
     
     # DQN agent with observation space size
     agent = DQNAgent(
-        state_dim=env.observation_space.shape[0],
+        state_dim=(3, GRID_SIZE, GRID_SIZE),  # instead of env.observation_space.shape[0]
+        feature_dim=8,
         action_dim=4
     )
     
@@ -617,7 +616,8 @@ def main():
     
     # Create DQN agent with observation space size
     agent = DQNAgent(
-        state_dim=env.observation_space.shape[0],
+        state_dim=(3, GRID_SIZE, GRID_SIZE),  # for the CNN grid
+        feature_dim=8,                        # for the handcrafted feature vector
         action_dim=4
     )
     
