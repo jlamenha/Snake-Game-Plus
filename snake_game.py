@@ -5,7 +5,7 @@ import numpy as np
 import sys
 import os
 
-from sheets_logger import GoogleSheetsLogger
+
 from config import *
 
 # Calculate dimensions
