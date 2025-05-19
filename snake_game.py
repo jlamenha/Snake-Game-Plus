@@ -40,12 +40,6 @@ class SnakeGame:
         # Track window dragging
         self.dragging = False
         self.drag_offset = (0, 0)
-
-        self.logging_enabled = False
-        
-        if self.logging_enabled:
-                    self.logger = GoogleSheetsLogger()
-                    self.logging_enabled = self.logger.setup()
         
         self.reset_game()
     
@@ -58,9 +52,7 @@ class SnakeGame:
         self.score = 0      # Initialize score
         self.move_count = 0
         
-        # Reset logger move counter
-        if self.logging_enabled:
-            self.logger.reset_counter()
+
     
     def generate_food(self):
         while True:
@@ -100,8 +92,6 @@ class SnakeGame:
         # Increment move counter
         self.move_count += 1
         
-        # Log game state after move
-        self.log_game_state()
     
     def get_board_state(self):
         # Create a numpy array to represent the board
@@ -120,22 +110,6 @@ class SnakeGame:
                 
         return board
     
-    def log_game_state(self):
-        # Skip if logging is disabled
-        if not self.logging_enabled:
-            return
-            
-        board_state = self.get_board_state()
-        
-        # Log the move
-        self.logger.log_move(
-            self.move_count,
-            self.score,
-            self.direction,
-            board_state,
-            self.snake.copy(),  # Make a copy to avoid reference issues
-            self.food
-        )
     
     def calculate_speed(self):
         # Calculate speed based on snake length
@@ -240,9 +214,6 @@ class SnakeGame:
             time.sleep(1)
     
     def show_game_over_screen(self):
-        # Save game data before showing game over screen
-        if self.logging_enabled:
-            self.logger.save_game_data()
 
         self.screen.fill((30, 30, 30))
 
@@ -260,16 +231,12 @@ class SnakeGame:
         score_text = font_instructions.render(f"Final Score: {self.score}", True, WHITE)
         score_rect = score_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 65))
         
-        # Optional logging message
-        log_text = font_instructions.render("Game data saved!" if self.logging_enabled else "", True, GREEN)
-        log_rect = log_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 115))
         
         # Render all texts
         self.screen.blit(text_game_over, text_game_over_rect)
         self.screen.blit(text_instructions, text_instructions_rect)
         self.screen.blit(score_text, score_rect)
-        self.screen.blit(log_text, log_rect)
-        
+
         self.draw_title_bar()
         pygame.display.flip()
         
@@ -297,8 +264,6 @@ class SnakeGame:
                     event = self.handle_events()
                     if event is False:
                         pygame.quit()
-                        if self.logging_enabled:
-                            self.logger.close()
                         return
                     
                     if event == 'SPACE':
@@ -312,8 +277,6 @@ class SnakeGame:
                     
                     if event is False:
                         pygame.quit()
-                        if self.logging_enabled:
-                            self.logger.close()
                         return
                     
                     if isinstance(event, pygame.event.Event) and event.type == pygame.KEYDOWN:
@@ -329,7 +292,4 @@ class SnakeGame:
                 if not self.show_game_over_screen():
                     break
         finally:
-            # Ensure we close the logger properly
-            if self.logging_enabled:
-                self.logger.close()
             pygame.quit()
